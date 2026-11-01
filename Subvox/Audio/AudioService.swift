@@ -46,6 +46,7 @@ final class AudioSink: @unchecked Sendable {
 @MainActor @Observable
 final class AudioService {
     private(set) var isRunning = false
+    private(set) var isStarting = false
     private(set) var level: Float = 0
     private(set) var devices: [AudioDevices.Device] = []
     private(set) var activeDeviceName: String?
@@ -55,22 +56,38 @@ final class AudioService {
         didSet {
             guard oldValue != selectedDeviceID, isRunning else { return }
             stop()
-            Task { await start() }
+            let restartGeneration = generation
+            Task {
+                guard generation == restartGeneration else { return }
+                await start()
+            }
         }
     }
 
     @ObservationIgnored let sink = AudioSink()
     @ObservationIgnored private var engine: AVAudioEngine?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private let requestAccess: () async -> Bool
+
+    init(requestAccess: @escaping () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) }) {
+        self.requestAccess = requestAccess
+    }
 
     func refreshDevices() {
         devices = AudioDevices.inputDevices()
     }
 
     func start() async {
-        guard !isRunning else { return }
+        guard !isRunning, !isStarting else { return }
         error = nil
+        generation += 1
+        let startGeneration = generation
+        isStarting = true
+        defer { if generation == startGeneration { isStarting = false } }
 
-        guard await AVCaptureDevice.requestAccess(for: .audio) else {
+        let authorized = await requestAccess()
+        guard generation == startGeneration else { return }
+        guard authorized else {
             error = "Microphone access denied. Enable it in System Settings › Privacy & Security."
             return
         }
@@ -115,9 +132,12 @@ final class AudioService {
     }
 
     func stop() {
-        guard let engine else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        generation += 1
+        isStarting = false
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
         self.engine = nil
         sink.setLevelHandler(nil)
         isRunning = false

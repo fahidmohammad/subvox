@@ -70,7 +70,7 @@ private struct MicrophoneCard: View {
                     }
                 }
                 HStack {
-                    Button(audio.isRunning ? "Stop Mic" : "Start Mic") {
+                    Button(audio.isRunning || audio.isStarting || model.transcriber.isStarting ? "Stop Mic" : "Start Mic") {
                         Task { await model.toggleMic() }
                     }
                     Button("Refresh", systemImage: "arrow.clockwise") { audio.refreshDevices() }
@@ -95,6 +95,7 @@ private struct MicrophoneCard: View {
 
 private struct RecordingCard: View {
     @Environment(AppModel.self) private var model
+    @State private var confirmingDelete = false
 
     var body: some View {
         @Bindable var recorder = model.recorder
@@ -127,11 +128,16 @@ private struct RecordingCard: View {
                     Spacer()
                     if let url = recorder.lastSessionURL {
                         Button("Show Last Session") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                        Button("Delete Last Session", role: .destructive) { confirmingDelete = true }
+                            .disabled(recorder.isRecording)
                     }
                 }
                 Text(model.audio.isRunning
                      ? "Motion + audio will be recorded. While recording, hold Space to mark each utterance."
                      : "Motion only — start the mic above to also record audio. Hold Space to mark each utterance.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Sessions are saved locally until you delete them. Shared copies and backups may retain the data.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let error = recorder.error {
@@ -140,6 +146,11 @@ private struct RecordingCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
+        }
+        .confirmationDialog("Delete the last session?", isPresented: $confirmingDelete) {
+            Button("Delete Session", role: .destructive) { recorder.deleteLastSession() }
+        } message: {
+            Text("This permanently deletes that session’s audio, motion, events and metadata.")
         }
     }
 }

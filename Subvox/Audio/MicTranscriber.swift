@@ -7,6 +7,7 @@ import Speech
 @MainActor @Observable
 final class MicTranscriber {
     private(set) var isRunning = false
+    private(set) var isStarting = false
     private(set) var text = ""
     private(set) var isOnDevice = false
     private(set) var error: String?
@@ -18,19 +19,34 @@ final class MicTranscriber {
     @ObservationIgnored private weak var sink: AudioSink?
     @ObservationIgnored private var finalized = ""
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var pendingStart: UUID?
 
     func start(sink: AudioSink) async {
-        guard !isRunning else { return }
+        guard !isRunning, !isStarting else { return }
         error = nil
+        guard let recognizer, recognizer.supportsOnDeviceRecognition else {
+            error = "On-device speech recognition is unavailable. No audio will be sent to a server."
+            return
+        }
+        let start = UUID()
+        pendingStart = start
+        isStarting = true
+        defer {
+            if pendingStart == start {
+                pendingStart = nil
+                isStarting = false
+            }
+        }
 
         let status = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
+        guard pendingStart == start else { return }
         guard status == .authorized else {
             error = "Speech recognition not authorized."
             return
         }
-        guard let recognizer, recognizer.isAvailable else {
+        guard recognizer.isAvailable else {
             error = "Speech recognizer unavailable."
             return
         }
@@ -42,7 +58,10 @@ final class MicTranscriber {
     }
 
     func stop() {
+        pendingStart = nil
+        isStarting = false
         isRunning = false
+        isOnDevice = false
         generation += 1
         if let sinkID { sink?.remove(sinkID) }
         sinkID = nil
@@ -54,17 +73,28 @@ final class MicTranscriber {
     func clear() {
         finalized = ""
         text = ""
+        if isRunning { startTask() }
+    }
+
+    static func onDeviceRequest(supported: Bool) -> SFSpeechAudioBufferRecognitionRequest? {
+        guard supported else { return nil }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = true
+        return request
     }
 
     private func startTask() {
         guard isRunning, let recognizer else { return }
+        guard let request = Self.onDeviceRequest(supported: recognizer.supportsOnDeviceRecognition) else {
+            stop()
+            error = "On-device speech recognition is unavailable. No audio will be sent to a server."
+            return
+        }
         generation += 1
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.addsPunctuation = true
-        isOnDevice = recognizer.supportsOnDeviceRecognition
-        request.requiresOnDeviceRecognition = isOnDevice
+        isOnDevice = true
         box.set(request)
 
         task?.cancel()
@@ -82,7 +112,8 @@ final class MicTranscriber {
             // Recognition tasks end on silence/timeout; keep listening with a fresh one.
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(failed ? 500 : 50))
-                self?.startTask()
+                guard let self, self.generation == generation else { return }
+                self.startTask()
             }
         }
     }

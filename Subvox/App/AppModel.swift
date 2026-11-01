@@ -71,6 +71,21 @@ final class AppModel {
         motion.start()
         audio.refreshDevices()
         installKeyMonitor()
+        syncCaptureMode()
+    }
+
+    func stop() {
+        capture.autoEnabled = false
+        capture.end()
+        recorder.stop()
+        transcriber.stop()
+        audio.stop()
+        motion.stop()
+        motion.onSample = nil
+        capture.onSegment = nil
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        started = false
     }
 
     private func ingest(_ sample: MotionSample) {
@@ -200,7 +215,7 @@ final class AppModel {
     // MARK: Mic
 
     func toggleMic() async {
-        if audio.isRunning {
+        if audio.isRunning || audio.isStarting || transcriber.isStarting {
             transcriber.stop()
             audio.stop()
         } else {

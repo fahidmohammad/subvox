@@ -10,21 +10,23 @@ struct Dataset: Codable {
 /// Persists the training set as JSON in Application Support.
 enum TemplateStore {
     static var url: URL {
-        let dir = URL.applicationSupportDirectory.appending(path: "Subvox", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appending(path: "dataset.json")
+        PrivateStorage.root.appending(path: "dataset.json")
     }
 
-    static func load() -> Dataset {
-        guard let data = try? Data(contentsOf: url),
-              let dataset = try? JSONDecoder().decode(Dataset.self, from: data) else { return .starter }
-        return dataset
+    static func load(from fileURL: URL? = nil) -> Dataset {
+        let destination = fileURL ?? url
+        do {
+            try PrivateStorage.createDirectory(at: destination.deletingLastPathComponent())
+            return try JSONDecoder().decode(Dataset.self, from: PrivateStorage.read(from: destination))
+        } catch {
+            return .starter
+        }
     }
 
-    static func save(_ dataset: Dataset) {
+    static func save(_ dataset: Dataset, to fileURL: URL? = nil) {
         do {
             let data = try JSONEncoder().encode(dataset)
-            try data.write(to: url, options: .atomic)
+            try PrivateStorage.write(data, to: fileURL ?? url)
         } catch {
             print("Subvox: failed to save dataset: \(error)")
         }

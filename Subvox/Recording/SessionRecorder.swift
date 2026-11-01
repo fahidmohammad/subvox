@@ -4,7 +4,7 @@ import Observation
 /// Records synchronized motion CSV + microphone audio + labelled segment events for offline
 /// analysis (normal speech vs. whisper vs. silent mouthing).
 ///
-/// Output: ~/Documents/Subvox/Sessions/<timestamp>-<condition>/
+/// Output: ~/Library/Application Support/Subvox/Sessions/<timestamp>-<condition>-<id>/
 ///   motion.csv  — every headphone-motion sample, t relative to session start
 ///   audio.caf   — microphone audio (if the mic is running)
 ///   events.csv  — captured segments with their label / prediction
@@ -35,9 +35,11 @@ final class SessionRecorder {
     private(set) var error: String?
 
     static var root: URL {
-        URL.documentsDirectory.appending(path: "Subvox/Sessions", directoryHint: .isDirectory)
+        PrivateStorage.root.appending(path: "Sessions", directoryHint: .isDirectory)
     }
 
+    @ObservationIgnored private let outputRoot: URL
+    @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var directory: URL?
     @ObservationIgnored private var startUptime: TimeInterval = 0
     @ObservationIgnored private var motionHandle: FileHandle?
@@ -47,33 +49,52 @@ final class SessionRecorder {
     @ObservationIgnored private weak var sink: AudioSink?
     @ObservationIgnored private var audioDeviceName: String?
 
+    init(root: URL? = nil, now: @escaping () -> Date = Date.init) {
+        outputRoot = root ?? Self.root
+        self.now = now
+    }
+
     func start(audio: AudioService) {
+        start(sink: audio.isRunning ? audio.sink : nil, deviceName: audio.activeDeviceName)
+    }
+
+    func start(sink: AudioSink?, deviceName: String?) {
         guard !isRecording else { return }
         error = nil
-        let stamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+        audioDeviceName = nil
+        let date = now()
+        let stamp = date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
             .replacingOccurrences(of: ":", with: "")
-        let dir = Self.root.appending(path: "\(stamp)-\(condition.slug)", directoryHint: .isDirectory)
+        let dir = outputRoot.appending(path: "\(stamp)-\(condition.slug)-\(UUID().uuidString)", directoryHint: .isDirectory)
+        var created = false
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if outputRoot == Self.root { try PrivateStorage.createDirectory(at: PrivateStorage.root) }
+            try PrivateStorage.createDirectory(at: outputRoot)
+            try PrivateStorage.createDirectory(at: dir, exclusive: true)
+            created = true
             motionHandle = try Self.makeFile(dir.appending(path: "motion.csv"), header: MotionSample.csvHeader)
             eventsHandle = try Self.makeFile(dir.appending(path: "events.csv"), header: "start,end,kind,label,confidence")
         } catch {
+            try? motionHandle?.close()
+            try? eventsHandle?.close()
+            motionHandle = nil
+            eventsHandle = nil
+            if created { try? FileManager.default.removeItem(at: dir) }
             self.error = error.localizedDescription
             return
         }
 
         directory = dir
         startUptime = ProcessInfo.processInfo.systemUptime
-        startedAt = Date()
+        startedAt = date
         motionCount = 0
         eventCount = 0
-
-        if audio.isRunning {
+        if let sink {
             let writer = AudioFileWriter(url: dir.appending(path: "audio.caf"))
             audioWriter = writer
-            sink = audio.sink
-            sinkID = audio.sink.add { buffer, time in writer.write(buffer, time) }
-            audioDeviceName = audio.activeDeviceName
+            self.sink = sink
+            sinkID = sink.add { buffer, time in writer.write(buffer, time) }
+            audioDeviceName = deviceName
         }
         isRecording = true
     }
@@ -84,9 +105,15 @@ final class SessionRecorder {
         if let sinkID { sink?.remove(sinkID) }
         sinkID = nil
         let audioInfo = audioWriter?.finish()
+        if let failure = audioWriter?.error { error = error ?? failure }
         audioWriter = nil
-        try? motionHandle?.close()
-        try? eventsHandle?.close()
+        sink = nil
+        do {
+            try motionHandle?.close()
+            try eventsHandle?.close()
+        } catch {
+            self.error = self.error ?? error.localizedDescription
+        }
         motionHandle = nil
         eventsHandle = nil
 
@@ -103,8 +130,11 @@ final class SessionRecorder {
             "audioStartOffsetSeconds": audioInfo?.firstHostSeconds.map { $0 - startUptime } ?? NSNull(),
             "note": "Motion t and audioStartOffsetSeconds are relative to startUptime (seconds since boot).",
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: directory.appending(path: "meta.json"))
+        do {
+            let data = try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+            try PrivateStorage.write(data, to: directory.appending(path: "meta.json"))
+        } catch {
+            self.error = self.error ?? error.localizedDescription
         }
         lastSessionURL = directory
         self.directory = nil
@@ -112,8 +142,17 @@ final class SessionRecorder {
 
     func record(_ sample: MotionSample) {
         guard isRecording else { return }
-        motionHandle?.write(Data((sample.csvRow(relativeTo: startUptime) + "\n").utf8))
-        motionCount += 1
+        do {
+            try motionHandle?.write(contentsOf: Data((sample.csvRow(relativeTo: startUptime) + "\n").utf8))
+            motionCount += 1
+            if let failure = audioWriter?.error {
+                error = failure
+                stop()
+            }
+        } catch {
+            self.error = error.localizedDescription
+            stop()
+        }
     }
 
     func logEvent(_ segment: [MotionSample], kind: String, label: String, confidence: Double?) {
@@ -121,24 +160,59 @@ final class SessionRecorder {
         let row = [
             String(format: "%.4f", first.t - startUptime),
             String(format: "%.4f", last.t - startUptime),
-            kind,
-            label.replacingOccurrences(of: ",", with: " "),
+            Self.csvText(kind),
+            Self.csvText(label),
             confidence.map { String(format: "%.3f", $0) } ?? "",
         ].joined(separator: ",")
-        eventsHandle?.write(Data((row + "\n").utf8))
-        eventCount += 1
+        do {
+            try eventsHandle?.write(contentsOf: Data((row + "\n").utf8))
+            eventCount += 1
+        } catch {
+            self.error = error.localizedDescription
+            stop()
+        }
+    }
+
+    func deleteLastSession() {
+        guard !isRecording else {
+            error = "Stop recording before deleting a session."
+            return
+        }
+        guard let lastSessionURL else { return }
+        do {
+            try FileManager.default.removeItem(at: lastSessionURL)
+            self.lastSessionURL = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Text-only, single-record CSV cells for spreadsheet analysis. JSON keeps the original prompt.
+    static func csvText(_ text: String) -> String {
+        var value = String(String.UnicodeScalarView(text.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) ? " " : $0
+        }))
+        if let first = value.trimmingCharacters(in: .whitespacesAndNewlines).first,
+           "=+-@＝＋－＠".contains(first) {
+            value = "\t" + value
+        }
+        return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     private static func makeFile(_ url: URL, header: String) throws -> FileHandle {
-        try Data((header + "\n").utf8).write(to: url)
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.seekToEnd()
-        return handle
+        let handle = try PrivateStorage.createFile(at: url)
+        do {
+            try handle.write(contentsOf: Data((header + "\n").utf8))
+            return handle
+        } catch {
+            try? handle.close()
+            throw error
+        }
     }
 }
 
 /// Writes tap buffers to disk from the audio thread.
-private final class AudioFileWriter: @unchecked Sendable {
+final class AudioFileWriter: @unchecked Sendable {
     struct Info {
         var sampleRate: Double
         var firstHostSeconds: Double?
@@ -148,7 +222,10 @@ private final class AudioFileWriter: @unchecked Sendable {
     private let lock = NSLock()
     private var file: AVAudioFile?
     private var info: Info?
-    private var failed = false
+    private var closed = false
+    private var failure: String?
+
+    var error: String? { lock.withLock { failure } }
 
     init(url: URL) {
         self.url = url
@@ -156,9 +233,11 @@ private final class AudioFileWriter: @unchecked Sendable {
 
     func write(_ buffer: AVAudioPCMBuffer, _ time: AVAudioTime) {
         lock.withLock {
-            guard !failed else { return }
+            guard !closed, failure == nil else { return }
             if file == nil {
                 do {
+                    let handle = try PrivateStorage.createFile(at: url)
+                    try handle.close()
                     let format = buffer.format
                     file = try AVAudioFile(
                         forWriting: url, settings: format.settings,
@@ -167,16 +246,21 @@ private final class AudioFileWriter: @unchecked Sendable {
                         sampleRate: format.sampleRate,
                         firstHostSeconds: time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil)
                 } catch {
-                    failed = true
+                    failure = error.localizedDescription
                     return
                 }
             }
-            try? file?.write(from: buffer)
+            do {
+                try file?.write(from: buffer)
+            } catch {
+                failure = error.localizedDescription
+            }
         }
     }
 
     func finish() -> Info? {
         lock.withLock {
+            closed = true
             file = nil
             return info
         }
