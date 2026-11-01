@@ -28,7 +28,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.joeblau.subvox
         CODE_SIGN_IDENTITY: Apple Development
-        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Subvox/Subvox.entitlements
   SubvoxTests:
     type: bundle.unit-test
     platform: macOS

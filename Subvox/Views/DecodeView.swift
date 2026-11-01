@@ -173,7 +173,7 @@ struct DecodeView: View {
         GroupBox("Microphone transcript (reference)") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Button(model.audio.isRunning ? "Stop Mic" : "Start Mic") {
+                    Button(model.audio.isRunning || model.audio.isStarting || model.transcriber.isStarting ? "Stop Mic" : "Start Mic") {
                         Task { await model.toggleMic() }
                     }
                     LevelMeter(value: Double(model.audio.level))
@@ -184,7 +184,7 @@ struct DecodeView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
                 if model.transcriber.isRunning {
-                    Text(model.transcriber.isOnDevice ? "On-device recognition" : "Server recognition")
+                    Text("On-device recognition")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

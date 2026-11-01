@@ -22,6 +22,14 @@ xcodebuild -project Subvox.xcodeproj -scheme Subvox -derivedDataPath build test
 
 Requires macOS 14+, AirPods Pro or another headphone that supports head tracking, connected as the Mac's audio output. On first launch, grant **Motion**. The mic and speech prompts only appear when you start the mic.
 
+Run the logic and recording regression tests without launching the app or requesting sensor access:
+
+```sh
+swift test
+```
+
+The XcodeGen project remains the app build. If you use a different signing team, override `DEVELOPMENT_TEAM` locally when building rather than changing the shared project specification.
+
 ## Screens
 
 | Screen | What it does |
@@ -39,7 +47,7 @@ Requires macOS 14+, AirPods Pro or another headphone that supports head tracking
 
 ## Experiment protocol
 
-Use **Record Session** in the toolbar or on the Sensors screen. Recordings go to `~/Documents/Subvox/Sessions/<timestamp>-<condition>/`:
+Use **Record Session** in the toolbar or on the Sensors screen. Recordings go to `~/Library/Application Support/Subvox/Sessions/<timestamp>-<condition>-<id>/`. Each session has a unique directory, even when recordings start in the same second:
 
 - `motion.csv`: every motion sample. `t` is seconds from session start.
 - `audio.caf`: microphone audio, if the mic is running.
@@ -49,6 +57,18 @@ Use **Record Session** in the toolbar or on the Sensors screen. Recordings go to
 Suggested runs: the same 5-word script under **Normal speech**, **Whisper** and **Silent mouthing**, 10 reps each. Then, in Train, compare the Evaluate results across feature sets.
 
 The training set lives at `~/Library/Application Support/Subvox/dataset.json`.
+
+## Privacy and recording lifecycle
+
+- Microphone transcription requires on-device speech recognition. If it is unsupported, Subvox reports an error and does not fall back to server recognition; the mic can still be used for local experiment recordings. Required speech assets must be available on the Mac.
+- Session and training directories are owner-only (`0700`), and files are owner-readable/writable (`0600`), including atomic dataset replacements. Subvox does not encrypt these files or isolate them from other processes running as your user. System backups can retain copies.
+- Recordings remain until you delete them. Use **Show Last Session** to inspect or copy a completed session and **Delete Last Session** to remove it after confirmation. Older sessions can be reviewed and deleted in the Sessions folder. There is no automatic expiry of experiment data.
+- Closing the capture window, moving the app to the background, or quitting stops capture and finalizes the recording. Reopening does not automatically restart the microphone. **Stop Recording** finalizes the session; **Stop Mic** controls the separate live microphone/transcript.
+- CSV text fields are quoted, embedded control characters are replaced with spaces, and formula-like text is prefixed with a tab inside its quoted cell for spreadsheet analysis. Machine consumers will see that prefix; `meta.json` preserves the original prompt. Treat shared recordings as sensitive data and import CSV text columns as text.
+
+Existing recordings in `~/Documents/Subvox/Sessions/` are not moved or deleted automatically. Review that location separately if you used an earlier version. The training dataset location and JSON format are unchanged; loading it tightens its file permissions.
+
+The app enables Hardened Runtime with the audio-input entitlement. It is still a development prototype without App Sandbox or a notarized distribution configuration. Live permission flows, AirPods/device changes and on-device recognition should be checked on the target Mac before collecting sensitive data.
 
 ## Known limits
 
